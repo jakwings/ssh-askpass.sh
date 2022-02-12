@@ -1,0 +1,164 @@
+#!/bin/sh
+
+# Copyright (C) 2022 by J.W https://github.com/jakwings/ssh-askpass.sh
+#
+#   TERMS AND CONDITIONS FOR COPYING, DISTRIBUTION AND MODIFICATION
+#
+#  0. You just DO WHAT THE FUCK YOU WANT TO.
+
+# ssh-askpass for Mac OS
+# ========================
+#
+# MacOS's Signed System Volume makes it hard to modify settings of ssh-agent in
+# /System/Library/LaunchAgents/com.openssh.ssh-agent.plist
+#
+# - https://support.apple.com/guide/security/signed-system-volume-security-secd698747c9
+# - https://grafxflow.co.uk/blog/mac-os-x/delete-ioplatformpluginfamilykext-macos-big-sur
+#
+# My workaround is provided here:
+#
+# *   Add these two options to ~/.ssh/config
+#
+#         UseKeychain=no
+#         AddKeysToAgent=ask
+#         # AddKeysToAgent=confirm may cause mysterious signing failure
+#
+# *   Run this command in your shell:
+#
+#         export SSH_ASKPASS=/absolute/path/to/ssh-askpass
+#
+# *   Environment variables as options:
+#
+#         export SSH_ASKPASS_GUI=[ON|OFF]           # default: auto on
+#         export SSH_ASKPASS_TIMEOUT=[<seconds>]    # default: 3 minutes
+#         export SSH_ASKPASS_CACHETIME=[<seconds>]  # default: 15 minutes
+#
+# It will fall back to GUI if interactive input from terminal is unavailable.
+#
+# This program works on Mac OS 10.15+ and requires no third-party dependencies.
+
+set -e -u -f +x; unset -v IFS; export LC_ALL=C
+
+export PATH='/usr/bin:/bin:/usr/sbin:/sbin'; PATH="$(getconf PATH)"
+
+use_gui="${SSH_ASKPASS_GUI:-OFF}"
+timeout="$(( ${SSH_ASKPASS_TIMEOUT:-180} ))"
+lifetime="$(( ${SSH_ASKPASS_CACHETIME:-900} ))"
+
+request=password
+message='Please enter the passphrase:'
+unset -v yesno passphrase  # also unexport
+
+if [ 0 -lt "$#" ]; then
+  message="$*"
+  case "${message}" in (*'?'|*'? ') request=consent; esac
+fi
+
+# TODO: ssh-add -d key
+cleanup="
+  launchctl remove jakwings.ssh-askpass.sh >/dev/null 2>&1 || true
+  launchctl submit -l jakwings.ssh-askpass.sh -- sh -c '
+    set +e
+    sleep -- ${lifetime}
+    ssh-add -D
+    launchctl remove jakwings.ssh-askpass.sh
+  '
+"
+
+# NOTE: exec </dev/tty can get your ssh stuck waiting for unclosed /dev/tty
+if [ ON != "${use_gui}" ] && [ -t 0 ]; then
+  # connected to terminal?  press Ctrl-C or Ctrl-D to abort
+  fg_pid="$$"
+  bg_pid="$(
+    (
+      set -e
+      sleep -- "${timeout}"
+      printf '(timeout)\n'
+      kill -- "${fg_pid}"
+    ) >&2 &  # let not parent wait on stdout
+    printf '%s' "$!"
+  )"
+  on_exit='kill -- "${bg_pid}" 2>/dev/null || true'
+
+  case "${request}" in
+    (consent)
+      printf '%s [y/N] ' "${message}" >&2
+      trap "${on_exit}" EXIT
+      IFS='' read -r yesno
+      case "${yesno}" in (''|[!yY]*) exit 1; esac
+      eval "${cleanup}"
+      ;;
+    (*)
+      printf '%s ' "${message}" >&2
+      stty="$(stty -g)"
+      trap "${on_exit}"'; stty "${stty}"' EXIT
+      stty -echo echonl
+      IFS='' read -r passphrase  # empty passphrase allowed
+      printf '%s' "${passphrase}"
+  esac
+else
+  passphrase="$(osascript - "${request}" "${message}" "${timeout}" "${cleanup}" \
+<<'EOT'
+    (* https://developer.apple.com/library/archive/documentation/AppleScript/Conceptual/AppleScriptLangGuide/ *)
+    use scripting additions
+
+    on run {|request|, |message|, |timeout|, |cleanup|}
+        local |response|
+
+        tell application "System Events"
+            launch
+            set |process| to first application process where frontmost is true
+            set |app| to my application id (bundle identifier of |process|)
+            try
+                if |request| is "consent" then
+                    display dialog |message| default button "Cancel" ¬
+                            with title "ssh-askpass" with icon caution ¬
+                            giving up after |timeout|
+                    if result's gave up then
+                        error number -1712
+                    else
+                        set |response| to ""  -- OK !
+                        do shell script |cleanup| without altering line endings
+                    end if
+                else
+                    display dialog |message| default button "OK" ¬
+                            with title "ssh-askpass" with icon caution ¬
+                            with hidden answer default answer "" ¬
+                            giving up after |timeout|
+                    if result's gave up then
+                        error number -1712
+                    else
+                        set |response| to result's text returned
+                    end if
+                end if
+                quit
+                tell me to focus on the |app|
+            on error e number n partial result r from o to t
+                quit
+                tell me to focus on the |app|
+                error e number n partial result r from o to t  -- Cancel ?
+            end try
+        end tell
+
+        return quoted form of (|response| as «class utf8»)
+    end run
+
+    to focus on the |app|
+        tell |app|
+            activate
+            if name of |app| is "iTerm" then
+                using terms from application "iTerm"
+                    if count of windows is greater than 0 then
+                        set |window| to front window
+                        if |window|'s is hotkey window then
+                            reveal hotkey window |window|
+                        end if
+                    end if
+                end using terms from
+            end if
+        end tell
+    end focus
+EOT
+  )"
+  eval "printf '%s' ${passphrase}"
+fi
