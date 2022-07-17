@@ -37,7 +37,7 @@
 #
 # This program works on Mac OS 10.15+ and requires no third-party dependencies.
 
-set -e -u -f +x; unset -v IFS; export LC_ALL=C
+set -e -u -f +x; unset -v _ IFS; export LC_ALL=C
 
 export PATH='/usr/bin:/bin:/usr/sbin:/sbin'; PATH="$(getconf PATH)"
 
@@ -55,6 +55,7 @@ if [ 0 -lt "$#" ]; then
 fi
 
 # TODO: ssh-add -d key
+# https://lobste.rs/s/w7udgv/fork_without_exec_is_dangerous_large#c_62lkyw
 cleanup="
   launchctl remove jakwings.ssh-askpass.sh >/dev/null 2>&1 || true
   launchctl submit -l jakwings.ssh-askpass.sh -- sh -c '
